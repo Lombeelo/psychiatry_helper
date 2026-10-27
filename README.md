@@ -25,12 +25,14 @@
 
 Пререквизиты: установленный go
 
-> cd backend
-> go run .
+```
+cd backend
+go run .
+```
 
 Фронт
 
 Пререквизиты: установленный Visual Studio с компонентами разработки desktop приложений на ПК, установленный flutter (я через плагин vscode делал, по инструкции с руководства для разрабов), и установленный dart
 
 (из корневой папки)
-> flutter run -d windows --dart-define=API_BASE_URL=http://localhost:8080
+`flutter run -d windows --dart-define=API_BASE_URL=http://localhost:8080`
