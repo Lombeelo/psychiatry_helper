@@ -11,11 +11,12 @@ import (
 	"time"
 
 	"example.com/backend/appservice"
+	"example.com/backend/auth"
 	"example.com/backend/httpapi"
+	"example.com/backend/seed"
 	sqlitestore "example.com/backend/sqlite"
 	"github.com/joho/godotenv"
 
-	"example.com/backend/auth"
 	_ "modernc.org/sqlite"
 )
 
@@ -43,9 +44,21 @@ func run() error {
 	}
 	defer store.Close()
 
+	credentials, err := seed.EnsureDemoData(ctx, store)
+	if err != nil {
+		return err
+	}
+
 	service := appservice.NewSQLiteService(store)
 
-	api := httpapi.New(auth.DevAuthenticator{}, service)
+	secret := env("JWT_SECRET", "dev-only-change-me")
+	api := httpapi.New(auth.NewJWT(secret), service)
+
+	log.Println("============================================================")
+	log.Println("Тестовые учётные записи для входа:")
+	log.Printf("  врач:    логин %q, пароль %q", credentials.DoctorLogin, credentials.DoctorPassword)
+	log.Printf("  пациент: логин %q, пароль %q", credentials.PatientLogin, credentials.PatientPassword)
+	log.Println("============================================================")
 
 	server := &http.Server{
 		Addr:              addr,

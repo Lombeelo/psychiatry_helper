@@ -1,53 +1,5 @@
 typedef JsonMap = Map<String, dynamic>;
 
-class CreatePatientRequest {
-  const CreatePatientRequest({
-    required this.displayName,
-    required this.dateOfBirth,
-    required this.policyVersion,
-    required this.accepted,
-  });
-
-  final String displayName;
-  final DateTime dateOfBirth;
-  final String policyVersion;
-  final bool accepted;
-
-  JsonMap toJson() => {
-    'display_name': displayName,
-    'date_of_birth': _dateOnly(dateOfBirth),
-    'policy_version': policyVersion,
-    'accepted': accepted,
-  };
-}
-
-class CreateDoctorRequest {
-  const CreateDoctorRequest({
-    required this.displayName,
-    required this.dateOfBirth,
-    required this.specialty,
-  });
-
-  final String displayName;
-  final DateTime dateOfBirth;
-  final String specialty;
-
-  JsonMap toJson() => {
-    'display_name': displayName,
-    'date_of_birth': _dateOnly(dateOfBirth),
-    'specialty': specialty,
-  };
-}
-
-class CreateRelationshipRequest {
-  const CreateRelationshipRequest({required this.patientCode});
-
-  /// Код пациента вида PXXXXXX — связь создаётся сразу после его ввода.
-  final String patientCode;
-
-  JsonMap toJson() => {'patient_code': patientCode.trim()};
-}
-
 class CreateAssignmentRequest {
   const CreateAssignmentRequest({
     required this.patientId,
@@ -187,8 +139,3 @@ class CreateMoodCheckInRequest {
 
   JsonMap toJson() => {'answers': answers, 'comment': comment};
 }
-
-String _dateOnly(DateTime value) =>
-    '${value.year.toString().padLeft(4, '0')}-'
-    '${value.month.toString().padLeft(2, '0')}-'
-    '${value.day.toString().padLeft(2, '0')}';

@@ -387,6 +387,27 @@ func (s *SQLiteService) CompleteAssignment(
 	}
 
 	now := s.now().UTC()
+	completions, err := s.store.ListCompletionsForPatient(ctx, patientID)
+	if err != nil {
+		return domain.Completion{}, err
+	}
+	completedToday := 0
+	for _, existing := range completions {
+		if existing.AssignmentID != assignmentID {
+			continue
+		}
+		if sameUTCDay(existing.CompletedAt, now) {
+			completedToday++
+		}
+	}
+	perDay := len(assignment.Schedule.TimesOfDay)
+	if perDay == 0 {
+		perDay = 1
+	}
+	if completedToday >= perDay {
+		return domain.Completion{}, domain.ErrAlreadyCompleted
+	}
+
 	completion, err := domain.NewCompletion(
 		domain.ID(uuid.NewString()),
 		assignment,
@@ -438,6 +459,22 @@ func (s *SQLiteService) CompleteAssignment(
 	if err := s.store.CreateCompletion(ctx, *completion); err != nil {
 		return domain.Completion{}, err
 	}
+
+	if completion.SideEffects != nil {
+		message := "Пациент сообщил о побочных эффектах"
+		if len(completion.SideEffects.Effects) > 0 {
+			message += ": " + strings.Join(completion.SideEffects.Effects, ", ")
+		}
+		notification := domain.Notification{
+			ID:          domain.ID(uuid.NewString()),
+			RecipientID: assignment.DoctorID,
+			PatientID:   patientID,
+			Type:        domain.NotificationSideEffect,
+			Message:     message,
+			CreatedAt:   now,
+		}
+		_ = s.store.CreateNotification(ctx, notification)
+	}
 	return *completion, nil
 }
 
@@ -446,6 +483,14 @@ func notFoundAsDomainError(err error) error {
 		return domain.ErrNotFound
 	}
 	return err
+}
+
+func sameUTCDay(left, right time.Time) bool {
+	left = left.UTC()
+	right = right.UTC()
+	return left.Year() == right.Year() &&
+		left.Month() == right.Month() &&
+		left.Day() == right.Day()
 }
 
 func (s *SQLiteService) CreateJournalEntry(

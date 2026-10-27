@@ -183,6 +183,19 @@ func TestDoctorPatientFlow(t *testing.T) {
 		t.Fatalf("side effects were not saved: %+v", completion)
 	}
 
+	if _, err := service.CompleteAssignment(
+		request,
+		patient.ID,
+		medication.ID,
+		httpapi.CompleteAssignmentRequest{
+			MedicationIntake: &httpapi.MedicationIntakeRequest{
+				ReportedAsTaken: true,
+			},
+		},
+	); !errors.Is(err, domain.ErrAlreadyCompleted) {
+		t.Fatalf("expected ErrAlreadyCompleted, got %v", err)
+	}
+
 	patientAssignments, err := service.ListAssignments(
 		request,
 		patient.ID,

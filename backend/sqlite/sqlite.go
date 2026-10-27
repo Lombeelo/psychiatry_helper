@@ -141,6 +141,49 @@ CREATE TABLE IF NOT EXISTS mood_check_ins (
 
 CREATE INDEX IF NOT EXISTS idx_mood_patient_created
     ON mood_check_ins(patient_id, created_at);
+
+CREATE TABLE IF NOT EXISTS credentials (
+    account_id    TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    login         TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS medication_groups (
+    group_id    TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS medications (
+    medication_id    TEXT PRIMARY KEY,
+    group_id         TEXT NOT NULL REFERENCES medication_groups(group_id),
+    name             TEXT NOT NULL,
+    instruction_text TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_medications_group
+    ON medications(group_id, name);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id           TEXT PRIMARY KEY,
+    recipient_id TEXT NOT NULL REFERENCES accounts(id),
+    patient_id   TEXT NOT NULL REFERENCES patients(account_id),
+    type         TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    read_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient
+    ON notifications(recipient_id, created_at);
+
+CREATE TABLE IF NOT EXISTS support_contents (
+    content_id   TEXT PRIMARY KEY,
+    trigger      TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    content_type TEXT NOT NULL
+);
 `
 
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {

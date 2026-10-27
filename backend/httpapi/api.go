@@ -16,17 +16,25 @@ type Principal struct {
 	Role   domain.AccountRole
 }
 
-// В production реализация должна проверять подписанный токен,
-// получать пользователя из базы и проверять его статус.
+// Authenticator проверяет bearer-токен и выдаёт новые токены после входа.
 type Authenticator interface {
 	Authenticate(r *http.Request) (Principal, error)
+	IssueToken(accountID domain.ID, role domain.AccountRole) (string, error)
 }
 
 type Service interface {
-	CreatePatient(r *http.Request, userID domain.ID, req CreatePatientRequest) (domain.Patient, error)
-	CreateDoctor(r *http.Request, userID domain.ID, req CreateDoctorRequest) (domain.Doctor, error)
+	Authenticate(r *http.Request, login, password string) (domain.Account, bool, string, error)
+	AcceptConsent(r *http.Request, patientID domain.ID, policyVersion string) error
+
 	CreateRelationship(r *http.Request, doctorID domain.ID, req CreateRelationshipRequest) (domain.CareRelationship, error)
 	EndRelationship(r *http.Request, doctorID, relationshipID domain.ID) error
+
+	ListPatients(r *http.Request, doctorID domain.ID) ([]PatientSummary, error)
+	GetPatientDetails(r *http.Request, doctorID, patientID domain.ID) (PatientDetails, error)
+	MyDoctor(r *http.Request, patientID domain.ID) (DoctorSummary, error)
+	ListJournalEntries(r *http.Request, patientID domain.ID) ([]domain.JournalEntry, error)
+	GetForest(r *http.Request, patientID domain.ID) (domain.ForestState, error)
+	UpdateAnamnesis(r *http.Request, patientID domain.ID, notes string) error
 
 	ListAssignments(r *http.Request, userID domain.ID, role domain.AccountRole, patientID domain.ID) ([]domain.Assignment, error)
 	CreateAssignment(r *http.Request, doctorID domain.ID, req CreateAssignmentRequest) (domain.Assignment, error)
@@ -35,6 +43,11 @@ type Service interface {
 
 	CreateJournalEntry(r *http.Request, patientID domain.ID, req CreateJournalEntryRequest) (domain.JournalEntry, error)
 	CreateMoodCheckIn(r *http.Request, patientID domain.ID, req CreateMoodCheckInRequest) (domain.MoodCheckIn, error)
+
+	ListNotifications(r *http.Request, recipientID domain.ID) ([]domain.Notification, error)
+	MarkNotificationRead(r *http.Request, recipientID, notificationID domain.ID) error
+	ListMedicationGroups(r *http.Request) ([]MedicationGroup, error)
+	ListSupportContents(r *http.Request) ([]domain.SupportContent, error)
 }
 
 type API struct {
@@ -60,10 +73,20 @@ func (a *API) routes() {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	a.mux.HandleFunc("POST /v1/patients", a.createPatient)
-	a.mux.HandleFunc("POST /v1/doctors", a.createDoctor)
+	a.mux.HandleFunc("POST /v1/auth/login", a.login)
+	a.mux.HandleFunc("POST /v1/consent", a.acceptConsent)
 	a.mux.HandleFunc("POST /v1/relationships", a.createRelationship)
 	a.mux.HandleFunc("POST /v1/relationships/{id}/end", a.endRelationship)
+
+	a.mux.HandleFunc("GET /v1/patients", a.listPatients)
+	a.mux.HandleFunc("GET /v1/patients/{id}", a.getPatientDetails)
+	a.mux.HandleFunc("GET /v1/my-doctor", a.myDoctor)
+	a.mux.HandleFunc("GET /v1/notifications", a.listNotifications)
+	a.mux.HandleFunc("POST /v1/notifications/{id}/read", a.markNotificationRead)
+	a.mux.HandleFunc("GET /v1/medications", a.listMedicationGroups)
+	a.mux.HandleFunc("GET /v1/support/messages", a.listSupportContents)
+	a.mux.HandleFunc("GET /v1/forest", a.getForest)
+	a.mux.HandleFunc("PUT /v1/anamnesis", a.updateAnamnesis)
 
 	a.mux.HandleFunc("GET /v1/assignments", a.listAssignments)
 	a.mux.HandleFunc("POST /v1/assignments", a.createAssignment)
@@ -74,6 +97,7 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /v1/assignments/{id}/complete", a.completeAssignment)
 
 	a.mux.HandleFunc("POST /v1/journal-entries", a.createJournalEntry)
+	a.mux.HandleFunc("GET /v1/journal-entries", a.listJournalEntries)
 	a.mux.HandleFunc("POST /v1/mood-check-ins", a.createMoodCheckIn)
 }
 
@@ -135,40 +159,287 @@ type CreateMoodCheckInRequest struct {
 	Comment string              `json:"comment"`
 }
 
-func (a *API) createPatient(w http.ResponseWriter, r *http.Request) {
+type LoginRequest struct {
+	Login    string `json:"login"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+}
+
+type AccountSummary struct {
+	AccountID   string `json:"account_id"`
+	Role        string `json:"role"`
+	Code        string `json:"code"`
+	DisplayName string `json:"display_name"`
+}
+
+type LoginResponse struct {
+	Token           string         `json:"token"`
+	Account         AccountSummary `json:"account"`
+	ConsentAccepted bool           `json:"consent_accepted"`
+	Anamnesis       string         `json:"anamnesis"`
+}
+
+type StatusReason struct {
+	Kind          string `json:"kind"`
+	Description   string `json:"description"`
+	ObservedValue string `json:"observed_value"`
+}
+
+type StatusSummary struct {
+	Color          string         `json:"color"`
+	Reasons        []StatusReason `json:"reasons"`
+	CalculatedAt   time.Time      `json:"calculated_at"`
+	DataSufficient bool           `json:"data_sufficient"`
+}
+
+type PatientSummary struct {
+	PatientID   string        `json:"patient_id"`
+	Code        string        `json:"code"`
+	DisplayName string        `json:"display_name"`
+	Notes       string        `json:"notes"`
+	Status      StatusSummary `json:"status"`
+}
+
+type PatientDetails struct {
+	Patient        PatientSummary        `json:"patient"`
+	Assignments    []domain.Assignment   `json:"assignments"`
+	JournalEntries []domain.JournalEntry `json:"journal_entries"`
+	MoodCheckIns   []domain.MoodCheckIn  `json:"mood_check_ins"`
+}
+
+type DoctorSummary struct {
+	DoctorID    string `json:"doctor_id"`
+	Code        string `json:"code"`
+	DisplayName string `json:"display_name"`
+	Specialty   string `json:"specialty"`
+}
+
+type Medication struct {
+	MedicationID    string `json:"medication_id"`
+	Name            string `json:"name"`
+	InstructionText string `json:"instruction_text"`
+}
+
+type MedicationGroup struct {
+	GroupID     string       `json:"group_id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Medications []Medication `json:"medications"`
+}
+
+type ConsentRequest struct {
+	PolicyVersion string `json:"policy_version"`
+}
+
+type AnamnesisRequest struct {
+	Notes string `json:"notes"`
+}
+
+func (a *API) login(w http.ResponseWriter, r *http.Request) {
+	var req LoginRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Login) == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "invalid_login", "Укажите логин и пароль")
+		return
+	}
+
+	account, consentAccepted, anamnesis, err := a.svc.Authenticate(
+		r,
+		req.Login,
+		req.Password,
+	)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+
+	requestedRole := domain.AccountRole(strings.ToUpper(strings.TrimSpace(req.Role)))
+	if requestedRole != "" && account.Code.Role != requestedRole {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Неверный логин или пароль")
+		return
+	}
+
+	token, err := a.auth.IssueToken(account.ID, account.Code.Role)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token_error", "could not issue token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, LoginResponse{
+		Token: token,
+		Account: AccountSummary{
+			AccountID:   string(account.ID),
+			Role:        string(account.Code.Role),
+			Code:        account.Code.Value,
+			DisplayName: account.Personal.DisplayName,
+		},
+		ConsentAccepted: consentAccepted,
+		Anamnesis:       anamnesis,
+	})
+}
+
+func (a *API) acceptConsent(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.requireRole(w, r, domain.RolePatient)
 	if !ok {
 		return
 	}
-	var req CreatePatientRequest
+	var req ConsentRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-
-	out, err := a.svc.CreatePatient(r, p.UserID, req)
-	if err != nil {
+	if strings.TrimSpace(req.PolicyVersion) == "" {
+		req.PolicyVersion = "v1"
+	}
+	if err := a.svc.AcceptConsent(r, p.UserID, req.PolicyVersion); err != nil {
 		a.writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"consent_accepted": true,
+		"policy_version":   req.PolicyVersion,
+	})
 }
 
-func (a *API) createDoctor(w http.ResponseWriter, r *http.Request) {
+func (a *API) listPatients(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.requireRole(w, r, domain.RoleDoctor)
 	if !ok {
 		return
 	}
-	var req CreateDoctorRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-
-	out, err := a.svc.CreateDoctor(r, p.UserID, req)
+	out, err := a.svc.ListPatients(r, p.UserID)
 	if err != nil {
 		a.writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, out)
+	writeJSON(w, http.StatusOK, map[string]any{"patients": out})
+}
+
+func (a *API) getPatientDetails(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RoleDoctor)
+	if !ok {
+		return
+	}
+	patientID := domain.ID(r.PathValue("id"))
+	if !patientID.Valid() {
+		writeError(w, http.StatusBadRequest, "invalid_patient_id", "patient id is required")
+		return
+	}
+	out, err := a.svc.GetPatientDetails(r, p.UserID, patientID)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *API) myDoctor(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RolePatient)
+	if !ok {
+		return
+	}
+	out, err := a.svc.MyDoctor(r, p.UserID)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *API) listNotifications(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireAnyRole(w, r, domain.RoleDoctor, domain.RolePatient)
+	if !ok {
+		return
+	}
+	out, err := a.svc.ListNotifications(r, p.UserID)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notifications": out})
+}
+
+func (a *API) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireAnyRole(w, r, domain.RoleDoctor, domain.RolePatient)
+	if !ok {
+		return
+	}
+	notificationID := domain.ID(r.PathValue("id"))
+	if !notificationID.Valid() {
+		writeError(w, http.StatusBadRequest, "invalid_id", "notification id is required")
+		return
+	}
+	if err := a.svc.MarkNotificationRead(r, p.UserID, notificationID); err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) listMedicationGroups(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireRole(w, r, domain.RoleDoctor); !ok {
+		return
+	}
+	out, err := a.svc.ListMedicationGroups(r)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
+}
+
+func (a *API) listSupportContents(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireRole(w, r, domain.RolePatient); !ok {
+		return
+	}
+	out, err := a.svc.ListSupportContents(r)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": out})
+}
+
+func (a *API) getForest(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RolePatient)
+	if !ok {
+		return
+	}
+	out, err := a.svc.GetForest(r, p.UserID)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"forest": out})
+}
+
+func (a *API) updateAnamnesis(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RolePatient)
+	if !ok {
+		return
+	}
+	var req AnamnesisRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := a.svc.UpdateAnamnesis(r, p.UserID, req.Notes); err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"notes": strings.TrimSpace(req.Notes)})
+}
+
+func (a *API) listJournalEntries(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RolePatient)
+	if !ok {
+		return
+	}
+	out, err := a.svc.ListJournalEntries(r, p.UserID)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"journal_entries": out})
 }
 
 func (a *API) createRelationship(w http.ResponseWriter, r *http.Request) {
@@ -334,11 +605,11 @@ func (a *API) createMoodCheckIn(w http.ResponseWriter, r *http.Request) {
 func (a *API) requireRole(w http.ResponseWriter, r *http.Request, role domain.AccountRole) (Principal, bool) {
 	p, err := a.auth.Authenticate(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Требуется вход в систему")
 		return Principal{}, false
 	}
 	if p.Role != role {
-		writeError(w, http.StatusForbidden, "forbidden", "insufficient permissions")
+		writeError(w, http.StatusForbidden, "forbidden", "Недостаточно прав")
 		return Principal{}, false
 	}
 	return p, true
@@ -347,7 +618,7 @@ func (a *API) requireRole(w http.ResponseWriter, r *http.Request, role domain.Ac
 func (a *API) requireAnyRole(w http.ResponseWriter, r *http.Request, roles ...domain.AccountRole) (Principal, bool) {
 	p, err := a.auth.Authenticate(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Требуется вход в систему")
 		return Principal{}, false
 	}
 	for _, role := range roles {
@@ -355,25 +626,29 @@ func (a *API) requireAnyRole(w http.ResponseWriter, r *http.Request, roles ...do
 			return p, true
 		}
 	}
-	writeError(w, http.StatusForbidden, "forbidden", "insufficient permissions")
+	writeError(w, http.StatusForbidden, "forbidden", "Недостаточно прав")
 	return Principal{}, false
 }
 
 func (a *API) writeServiceError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, domain.ErrInvalidCredentials):
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Неверный логин или пароль")
 	case errors.Is(err, domain.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrAlreadyEnded):
 		writeError(w, http.StatusConflict, "invalid_transition", err.Error())
+	case errors.Is(err, domain.ErrAlreadyCompleted):
+		writeError(w, http.StatusConflict, "already_completed", "На сегодня выполнение уже отмечено")
 	case errors.Is(err, domain.ErrDuplicateRelationship):
-		writeError(w, http.StatusConflict, "relationship_exists", "active care relationship already exists")
+		writeError(w, http.StatusConflict, "relationship_exists", "Активная связь уже существует")
 	case errors.Is(err, domain.ErrAccountExists):
-		writeError(w, http.StatusConflict, "account_exists", "account already exists")
+		writeError(w, http.StatusConflict, "account_exists", "Учётная запись уже существует")
 	case errors.Is(err, domain.ErrUserNotFound):
-		writeError(w, http.StatusNotFound, "user_not_found", "user with this code was not found")
+		writeError(w, http.StatusNotFound, "user_not_found", "Пользователь с таким кодом не найден")
 	case errors.Is(err, domain.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found", "requested object was not found")
+		writeError(w, http.StatusNotFound, "not_found", "Объект не найден")
 	case errors.Is(err, domain.ErrInactiveRelation),
 		errors.Is(err, domain.ErrAssignmentMismatch):
 		writeError(w, http.StatusForbidden, "access_denied", "operation is not allowed")

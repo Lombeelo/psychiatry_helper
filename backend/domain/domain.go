@@ -16,6 +16,8 @@ var (
 	ErrAlreadyEnded          = errors.New("care relationship already ended")
 	ErrNotFound              = errors.New("not found")
 	ErrUserNotFound          = errors.New("user not found")
+	ErrInvalidCredentials    = errors.New("invalid credentials")
+	ErrAlreadyCompleted      = errors.New("assignment already completed today")
 	ErrDuplicateRelationship = errors.New("active care relationship already exists")
 	ErrAccountExists         = errors.New("account already exists")
 )
