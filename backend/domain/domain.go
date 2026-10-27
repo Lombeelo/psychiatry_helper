@@ -9,11 +9,15 @@ import (
 )
 
 var (
-	ErrInvalidInput       = errors.New("invalid input")
-	ErrInvalidTransition  = errors.New("invalid status transition")
-	ErrInactiveRelation   = errors.New("active care relationship required")
-	ErrAssignmentMismatch = errors.New("assignment does not belong to patient")
-	ErrAlreadyEnded       = errors.New("care relationship already ended")
+	ErrInvalidInput          = errors.New("invalid input")
+	ErrInvalidTransition     = errors.New("invalid status transition")
+	ErrInactiveRelation      = errors.New("active care relationship required")
+	ErrAssignmentMismatch    = errors.New("assignment does not belong to patient")
+	ErrAlreadyEnded          = errors.New("care relationship already ended")
+	ErrNotFound              = errors.New("not found")
+	ErrUserNotFound          = errors.New("user not found")
+	ErrDuplicateRelationship = errors.New("active care relationship already exists")
+	ErrAccountExists         = errors.New("account already exists")
 )
 
 type ID string
@@ -32,31 +36,65 @@ const (
 	RoleAdmin   AccountRole = "ADMIN"
 )
 
+// UserCode — код, который отображается вместо персональных данных:
+// PXXXXXX у пациента и VXXXXXX у врача. Администратор — заглушка
+// без рабочего кода.
 type UserCode struct {
-	Value string
-	Role  AccountRole
+	Value string      `json:"value"`
+	Role  AccountRole `json:"role"`
 }
 
+const userCodeSuffixLength = 6
+
 func (c UserCode) Validate() error {
-	if strings.TrimSpace(c.Value) == "" {
-		return fmt.Errorf("%w: empty user code", ErrInvalidInput)
+	value := strings.TrimSpace(c.Value)
+	if len(value) != userCodeSuffixLength+1 {
+		return fmt.Errorf("%w: user code must match PXXXXXX or VXXXXXX", ErrInvalidInput)
 	}
+
+	var prefix byte
 	switch c.Role {
-	case RolePatient, RoleDoctor, RoleAdmin:
-		return nil
+	case RolePatient:
+		prefix = 'P'
+	case RoleDoctor:
+		prefix = 'V'
+	case RoleAdmin:
+		return fmt.Errorf("%w: administrator accounts are a stub and have no user code", ErrInvalidInput)
 	default:
 		return fmt.Errorf("%w: unknown account role", ErrInvalidInput)
 	}
+
+	if value[0] != prefix {
+		return fmt.Errorf("%w: code %q must start with %q", ErrInvalidInput, value, string(prefix))
+	}
+	for i := 1; i < len(value); i++ {
+		if !isUpperAlphaNumeric(value[i]) {
+			return fmt.Errorf("%w: user code allows only A-Z and 0-9", ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
+func isUpperAlphaNumeric(value byte) bool {
+	return (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
+}
+
+// Valid сообщает, соответствует ли код ожидаемому формату.
+func (c UserCode) Valid() bool {
+	return c.Validate() == nil
 }
 
 type PersonalData struct {
-	DisplayName string
-	DateOfBirth time.Time
+	DisplayName string    `json:"display_name"`
+	DateOfBirth time.Time `json:"date_of_birth"`
 }
 
 func (p PersonalData) Validate() error {
 	if strings.TrimSpace(p.DisplayName) == "" {
 		return fmt.Errorf("%w: display name is required", ErrInvalidInput)
+	}
+	if p.DateOfBirth.IsZero() {
+		return fmt.Errorf("%w: date of birth is required", ErrInvalidInput)
 	}
 	if p.DateOfBirth.After(time.Now()) {
 		return fmt.Errorf("%w: date of birth is in the future", ErrInvalidInput)
@@ -67,16 +105,24 @@ func (p PersonalData) Validate() error {
 // ---------- Учётные записи и связь ----------
 
 type Account struct {
-	ID        ID
-	Code      UserCode
-	Personal  PersonalData
-	CreatedAt time.Time
+	ID        ID           `json:"account_id"`
+	Code      UserCode     `json:"code"`
+	Personal  PersonalData `json:"personal_data"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+type PatientProfile struct {
+	Notes string `json:"notes"`
+}
+
+type DoctorProfile struct {
+	Specialty string `json:"specialty"`
 }
 
 type Consent struct {
-	Accepted      bool
-	PolicyVersion string
-	AcceptedAt    *time.Time
+	Accepted      bool       `json:"accepted"`
+	PolicyVersion string     `json:"policy_version"`
+	AcceptedAt    *time.Time `json:"accepted_at"`
 }
 
 func (c Consent) Validate() error {
@@ -88,13 +134,20 @@ func (c Consent) Validate() error {
 
 type Patient struct {
 	Account
-	Notes   string
-	Consent Consent
+	Profile PatientProfile `json:"profile"`
+	Consent Consent        `json:"consent"`
 }
 
 type Doctor struct {
 	Account
-	Specialty string
+	Profile DoctorProfile `json:"profile"`
+}
+
+// AdminStub — обозначение роли администратора в MVP.
+// Административные функции не реализуются.
+type AdminStub struct {
+	Account
+	Available bool `json:"available"`
 }
 
 type RelationshipStatus string
@@ -106,12 +159,12 @@ const (
 
 // CareRelationship — агрегатная граница связи врача и пациента.
 type CareRelationship struct {
-	ID        ID
-	PatientID ID
-	DoctorID  ID
-	CreatedAt time.Time
-	EndedAt   *time.Time
-	Status    RelationshipStatus
+	ID        ID                 `json:"relationship_id"`
+	PatientID ID                 `json:"patient_id"`
+	DoctorID  ID                 `json:"doctor_id"`
+	CreatedAt time.Time          `json:"created_at"`
+	EndedAt   *time.Time         `json:"ended_at"`
+	Status    RelationshipStatus `json:"status"`
 }
 
 func NewCareRelationship(id, patientID, doctorID ID, now time.Time) (*CareRelationship, error) {
@@ -155,8 +208,8 @@ const (
 )
 
 type Period struct {
-	StartsAt time.Time
-	EndsAt   time.Time
+	StartsAt time.Time `json:"starts_at"`
+	EndsAt   time.Time `json:"ends_at"`
 }
 
 func (p Period) Validate() error {
@@ -171,9 +224,9 @@ func (p Period) Contains(t time.Time) bool {
 }
 
 type Schedule struct {
-	Frequency  string
-	DaysOfWeek []time.Weekday
-	TimesOfDay []string // формат HH:MM; часовой пояс — пациента
+	Frequency  string         `json:"frequency"`
+	DaysOfWeek []time.Weekday `json:"days_of_week"`
+	TimesOfDay []string       `json:"times_of_day"` // формат HH:MM; часовой пояс — пациента
 }
 
 func (s Schedule) Validate() error {
@@ -194,8 +247,9 @@ type AssignmentDetails interface {
 }
 
 type Dosage struct {
-	Amount float64
-	Unit   string
+	Amount       float64 `json:"amount"`
+	Unit         string  `json:"unit"`
+	Instructions string  `json:"instructions"`
 }
 
 func (d Dosage) Validate() error {
@@ -206,9 +260,9 @@ func (d Dosage) Validate() error {
 }
 
 type MedicationDetails struct {
-	MedicationID ID
-	Dosage       Dosage
-	Instructions string
+	MedicationID ID     `json:"medication_id"`
+	Dosage       Dosage `json:"dosage"`
+	Instructions string `json:"instructions"`
 }
 
 func (d MedicationDetails) Kind() AssignmentType { return AssignmentMedication }
@@ -220,8 +274,8 @@ func (d MedicationDetails) Validate() error {
 }
 
 type QuestionnaireDetails struct {
-	QuestionnaireID        ID
-	QuestionnaireVersionID ID
+	QuestionnaireID        ID `json:"questionnaire_id"`
+	QuestionnaireVersionID ID `json:"questionnaire_version_id"`
 }
 
 func (d QuestionnaireDetails) Kind() AssignmentType { return AssignmentQuestionnaire }
@@ -232,28 +286,32 @@ func (d QuestionnaireDetails) Validate() error {
 	return nil
 }
 
-type AppCheckInDetails struct{ Instructions string }
+type AppCheckInDetails struct {
+	Instructions string `json:"instructions"`
+}
 
 func (d AppCheckInDetails) Kind() AssignmentType { return AssignmentAppCheckIn }
 func (d AppCheckInDetails) Validate() error      { return nil }
 
-type JournalTaskDetails struct{ Prompt string }
+type JournalTaskDetails struct {
+	Prompt string `json:"prompt"`
+}
 
 func (d JournalTaskDetails) Kind() AssignmentType { return AssignmentJournalTask }
 func (d JournalTaskDetails) Validate() error      { return nil }
 
 // Assignment — агрегат. Детали задаются типизированным интерфейсом.
 type Assignment struct {
-	ID        ID
-	PatientID ID
-	DoctorID  ID
-	Type      AssignmentType
-	Title     string
-	Period    Period
-	Schedule  Schedule
-	Status    AssignmentStatus
-	Details   AssignmentDetails
-	CreatedAt time.Time
+	ID        ID                `json:"assignment_id"`
+	PatientID ID                `json:"patient_id"`
+	DoctorID  ID                `json:"doctor_id"`
+	Type      AssignmentType    `json:"type"`
+	Title     string            `json:"title"`
+	Period    Period            `json:"period"`
+	Schedule  Schedule          `json:"schedule"`
+	Status    AssignmentStatus  `json:"status"`
+	Details   AssignmentDetails `json:"details"`
+	CreatedAt time.Time         `json:"created_at"`
 }
 
 func NewAssignment(
@@ -323,27 +381,44 @@ func (a *Assignment) Cancel() error {
 // ---------- Выполнение назначения ----------
 
 type MedicationIntake struct {
-	TakenAt         time.Time
-	ReportedAsTaken bool
-	DosageTaken     string
+	TakenAt         time.Time `json:"taken_at"`
+	ReportedAsTaken bool      `json:"reported_as_taken"`
+	DosageTaken     string    `json:"dosage_taken"`
+}
+
+func (m MedicationIntake) Validate() error {
+	if m.TakenAt.IsZero() {
+		return fmt.Errorf("%w: intake time is required", ErrInvalidInput)
+	}
+	return nil
 }
 
 type SideEffectReport struct {
-	Effects    []string
-	Comment    string
-	ReportedAt time.Time
+	Effects    []string  `json:"effects"`
+	Comment    string    `json:"comment"`
+	ReportedAt time.Time `json:"reported_at"`
+}
+
+func (s SideEffectReport) Validate() error {
+	if s.ReportedAt.IsZero() {
+		return fmt.Errorf("%w: side effect report time is required", ErrInvalidInput)
+	}
+	if len(s.Effects) == 0 && strings.TrimSpace(s.Comment) == "" {
+		return fmt.Errorf("%w: side effect report requires effects or a comment", ErrInvalidInput)
+	}
+	return nil
 }
 
 // Completion — отдельный агрегат, чтобы выполнения можно было хранить независимо.
 type Completion struct {
-	ID           ID
-	AssignmentID ID
-	PatientID    ID
-	CompletedAt  time.Time
-	Comment      string
-	Result       string
-	Intake       *MedicationIntake
-	SideEffects  *SideEffectReport
+	ID           ID                `json:"completion_id"`
+	AssignmentID ID                `json:"assignment_id"`
+	PatientID    ID                `json:"patient_id"`
+	CompletedAt  time.Time         `json:"completed_at"`
+	Comment      string            `json:"comment"`
+	Result       string            `json:"result"`
+	Intake       *MedicationIntake `json:"intake,omitempty"`
+	SideEffects  *SideEffectReport `json:"side_effects,omitempty"`
 }
 
 func NewCompletion(
@@ -385,40 +460,70 @@ const (
 )
 
 type Question struct {
-	ID           ID
-	Text         string
-	AnswerType   AnswerType
-	Options      []string
-	ScoreMapping map[string]float64
+	ID           ID                 `json:"question_id"`
+	Text         string             `json:"text"`
+	AnswerType   AnswerType         `json:"answer_type"`
+	Options      []string           `json:"options"`
+	ScoreMapping map[string]float64 `json:"score_mapping"`
+}
+
+// ScoringRule — правило подсчёта конкретной версии опросника.
+// Порог низкого результата хранится в QuestionnaireVersion, потому что
+// результаты разных опросников не сравниваются по общей шкале.
+type ScoringRule struct {
+	Description string `json:"description"`
+}
+
+func (r ScoringRule) Calculate(answers []Answer) float64 {
+	var total float64
+	for _, answer := range answers {
+		total += answer.Score
+	}
+	return total
+}
+
+func (r ScoringRule) Classify(score, lowScoreThreshold float64) ResultCategory {
+	if score <= lowScoreThreshold {
+		return ResultLow
+	}
+	return ResultOther
 }
 
 type QuestionnaireVersion struct {
-	ID                ID
-	Version           string
-	Questions         []Question
-	LowScoreThreshold float64
-	CreatedAt         time.Time
-	IsActive          bool
+	ID                ID          `json:"questionnaire_version_id"`
+	Version           string      `json:"version"`
+	ScoringRule       ScoringRule `json:"scoring_rule"`
+	Questions         []Question  `json:"questions"`
+	LowScoreThreshold float64     `json:"low_score_threshold"`
+	CreatedAt         time.Time   `json:"created_at"`
+	IsActive          bool        `json:"is_active"`
 }
 
-// ScoringRule должен быть версионированным и фиксированным после публикации.
-// Конкретные правила подсчёта зависят от выбранного опросника.
+// Questionnaire — агрегат: опросник и его версии.
+type Questionnaire struct {
+	ID       ID                     `json:"questionnaire_id"`
+	Name     string                 `json:"name"`
+	IsActive bool                   `json:"is_active"`
+	Versions []QuestionnaireVersion `json:"versions"`
+}
+
+// ScoreMapping фиксируется вместе с версией и после публикации не меняется.
 type Answer struct {
-	QuestionID ID
-	Value      string
-	Score      float64
+	QuestionID ID      `json:"question_id"`
+	Value      string  `json:"value"`
+	Score      float64 `json:"score"`
 }
 
 type QuestionnaireAttempt struct {
-	ID                     ID
-	QuestionnaireID        ID
-	QuestionnaireVersionID ID
-	PatientID              ID
-	AssignmentID           ID
-	Answers                []Answer
-	Score                  float64
-	Category               ResultCategory
-	CompletedAt            time.Time
+	ID                     ID             `json:"attempt_id"`
+	QuestionnaireID        ID             `json:"questionnaire_id"`
+	QuestionnaireVersionID ID             `json:"questionnaire_version_id"`
+	PatientID              ID             `json:"patient_id"`
+	AssignmentID           ID             `json:"assignment_id,omitempty"`
+	Answers                []Answer       `json:"answers"`
+	Score                  float64        `json:"score"`
+	Category               ResultCategory `json:"result_category"`
+	CompletedAt            time.Time      `json:"completed_at"`
 }
 
 func (a QuestionnaireAttempt) ValidateAgainst(version QuestionnaireVersion) error {
@@ -428,31 +533,45 @@ func (a QuestionnaireAttempt) ValidateAgainst(version QuestionnaireVersion) erro
 	if len(a.Answers) != len(version.Questions) {
 		return fmt.Errorf("%w: incomplete questionnaire", ErrInvalidInput)
 	}
+
+	expected := make(map[ID]struct{}, len(version.Questions))
+	for _, question := range version.Questions {
+		expected[question.ID] = struct{}{}
+	}
+	for _, answer := range a.Answers {
+		if _, ok := expected[answer.QuestionID]; !ok {
+			return fmt.Errorf("%w: answer for unknown question %q", ErrInvalidInput, answer.QuestionID)
+		}
+		delete(expected, answer.QuestionID)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("%w: not every question is answered", ErrInvalidInput)
+	}
 	return nil
 }
 
 // ---------- Дневник и отметки состояния ----------
 
 type JournalEntry struct {
-	ID               ID
-	PatientID        ID
-	Text             string
-	ReflectionPrompt string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID               ID        `json:"entry_id"`
+	PatientID        ID        `json:"patient_id"`
+	Text             string    `json:"text"`
+	ReflectionPrompt string    `json:"reflection_prompt"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type MoodAnswer struct {
-	Question string
-	Value    string
+	Question string `json:"question"`
+	Value    string `json:"value"`
 }
 
 type MoodCheckIn struct {
-	ID        ID
-	PatientID ID
-	Answers   []MoodAnswer
-	Comment   string
-	CreatedAt time.Time
+	ID        ID           `json:"check_in_id"`
+	PatientID ID           `json:"patient_id"`
+	Answers   []MoodAnswer `json:"answers"`
+	Comment   string       `json:"comment"`
+	CreatedAt time.Time    `json:"created_at"`
 }
 
 func (m MoodCheckIn) Validate() error {
@@ -480,16 +599,31 @@ const (
 )
 
 type StatusReason struct {
-	Kind          StatusReasonKind
-	Description   string
-	ObservedValue string
-	Period        Period
+	Kind          StatusReasonKind `json:"kind"`
+	Description   string           `json:"description"`
+	ObservedValue string           `json:"observed_value"`
+	Period        Period           `json:"period"`
 }
 
 type PatientStatus struct {
-	Color        StatusColor
-	Reasons      []StatusReason
-	CalculatedAt time.Time
+	Color        StatusColor    `json:"color"`
+	Reasons      []StatusReason `json:"reasons"`
+	CalculatedAt time.Time      `json:"calculated_at"`
+}
+
+// MedicationAdherence — результат анализа пропусков приёма лекарств.
+type MedicationAdherence struct {
+	MissedCount int    `json:"missed_count"`
+	Period      Period `json:"period"`
+}
+
+// QuestionnaireTrend — результат анализа последовательных низких результатов
+// в рамках одного опросника и его версии.
+type QuestionnaireTrend struct {
+	QuestionnaireID        ID      `json:"questionnaire_id"`
+	QuestionnaireVersionID ID      `json:"questionnaire_version_id"`
+	ConsecutiveLowResults  int     `json:"consecutive_low_results"`
+	Threshold              float64 `json:"threshold"`
 }
 
 // StatusPolicy — доменный сервис. Здесь намеренно нет медицинского диагноза
@@ -508,13 +642,13 @@ const (
 )
 
 type Notification struct {
-	ID          ID
-	RecipientID ID
-	PatientID   ID
-	Type        NotificationType
-	Message     string
-	CreatedAt   time.Time
-	ReadAt      *time.Time
+	ID          ID               `json:"notification_id"`
+	RecipientID ID               `json:"recipient_id"`
+	PatientID   ID               `json:"patient_id"`
+	Type        NotificationType `json:"type"`
+	Message     string           `json:"message"`
+	CreatedAt   time.Time        `json:"created_at"`
+	ReadAt      *time.Time       `json:"read_at"`
 }
 
 // ---------- Поддержка и геймификация ----------
@@ -528,32 +662,57 @@ const (
 )
 
 type SupportContent struct {
-	ID          ID
-	Trigger     string
-	Message     string
-	ContentType SupportContentType
+	ID          ID                 `json:"content_id"`
+	Trigger     string             `json:"trigger"`
+	Message     string             `json:"message"`
+	ContentType SupportContentType `json:"content_type"`
 }
 
 type ForestActivity struct {
-	ActivityType string
-	OccurredAt   time.Time
-	Points       int
+	ActivityType string    `json:"activity_type"`
+	OccurredAt   time.Time `json:"occurred_at"`
+	Points       int       `json:"points"`
 }
 
 type ForestState struct {
-	ID          ID
-	PatientID   ID
-	GrowthLevel int
-	Activities  []ForestActivity
-	UpdatedAt   time.Time
+	ID          ID               `json:"forest_id"`
+	PatientID   ID               `json:"patient_id"`
+	GrowthLevel int              `json:"growth_level"`
+	Activities  []ForestActivity `json:"activities"`
+	UpdatedAt   time.Time        `json:"updated_at"`
 }
 
 func (f *ForestState) ApplyActivity(activity ForestActivity) error {
 	if !f.PatientID.Valid() || activity.Points < 0 {
 		return fmt.Errorf("%w: invalid forest activity", ErrInvalidInput)
 	}
+	// Повторное открытие той же записи не начисляет прогресс снова.
+	for _, existing := range f.Activities {
+		if existing.ActivityType == activity.ActivityType &&
+			existing.OccurredAt.Equal(activity.OccurredAt) {
+			return nil
+		}
+	}
 	f.Activities = append(f.Activities, activity)
 	f.GrowthLevel += activity.Points
 	f.UpdatedAt = activity.OccurredAt
 	return nil
+}
+
+// ---------- Справочники ----------
+
+// MedicationGroup — группа препаратов из справочника.
+type MedicationGroup struct {
+	ID          ID     `json:"group_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// Medication — препарат из справочника. Приложение не назначает
+// препарат само: врач выбирает его из справочника.
+type Medication struct {
+	ID              ID     `json:"medication_id"`
+	Name            string `json:"name"`
+	GroupID         ID     `json:"group_id"`
+	InstructionText string `json:"instruction_text"`
 }

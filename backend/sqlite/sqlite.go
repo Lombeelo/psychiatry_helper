@@ -162,20 +162,72 @@ func (s *Store) ListAssignmentsForDoctor(
 	}
 	defer rows.Close()
 
-	var result []domain.Assignment
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan assignment id: %w", err)
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assignments: %w", err)
+	}
+	// Store uses a single SQLite connection, so rows must be closed before
+	// loading assignments; otherwise GetAssignment waits for the connection.
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close assignment rows: %w", err)
+	}
+
+	result := make([]domain.Assignment, 0, len(ids))
+	for _, id := range ids {
 		assignment, err := s.GetAssignment(ctx, domain.ID(id))
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, assignment)
 	}
+	return result, nil
+}
+
+func (s *Store) ListAssignmentsForDoctorAndPatient(
+	ctx context.Context,
+	doctorID, patientID domain.ID,
+) ([]domain.Assignment, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM assignments
+		 WHERE doctor_id = ? AND patient_id = ?
+		 ORDER BY created_at DESC`,
+		string(doctorID),
+		string(patientID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list patient assignments for doctor: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan assignment id: %w", err)
+		}
+		ids = append(ids, id)
+	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate assignments: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close assignment rows: %w", err)
+	}
+
+	result := make([]domain.Assignment, 0, len(ids))
+	for _, id := range ids {
+		assignment, err := s.GetAssignment(ctx, domain.ID(id))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, assignment)
 	}
 	return result, nil
 }
@@ -242,7 +294,7 @@ func (s *Store) CreatePatient(ctx context.Context, patient domain.Patient) error
 		INSERT INTO patients (account_id, notes, consent_accepted, policy_version, accepted_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		string(patient.ID),
-		patient.Notes,
+		patient.Profile.Notes,
 		boolInt(patient.Consent.Accepted),
 		patient.Consent.PolicyVersion,
 		acceptedAt,
@@ -267,7 +319,7 @@ func (s *Store) CreateDoctor(ctx context.Context, doctor domain.Doctor) error {
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO doctors (account_id, specialty) VALUES (?, ?)`,
-		string(doctor.ID), doctor.Specialty)
+		string(doctor.ID), doctor.Profile.Specialty)
 	if err != nil {
 		return fmt.Errorf("create doctor: %w", err)
 	}
@@ -309,14 +361,19 @@ func (s *Store) CreateRelationship(ctx context.Context, relationship domain.Care
 	return nil
 }
 
-func (s *Store) EndRelationship(ctx context.Context, id domain.ID, now time.Time) error {
+func (s *Store) EndRelationship(
+	ctx context.Context,
+	id, doctorID domain.ID,
+	now time.Time,
+) error {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE care_relationships
 		SET status = ?, ended_at = ?
-		WHERE id = ? AND status = ?`,
+		WHERE id = ? AND doctor_id = ? AND status = ?`,
 		string(domain.RelationshipEnded),
 		formatTime(now),
 		string(id),
+		string(doctorID),
 		string(domain.RelationshipActive),
 	)
 	if err != nil {
@@ -328,9 +385,54 @@ func (s *Store) EndRelationship(ctx context.Context, id domain.ID, now time.Time
 		return fmt.Errorf("check ended relationship: %w", err)
 	}
 	if rows == 0 {
-		return domain.ErrAlreadyEnded
+		// Связь не найдена, уже завершена или принадлежит другому врачу.
+		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// AccountExists проверяет, существует ли учётная запись.
+func (s *Store) AccountExists(ctx context.Context, id domain.ID) (bool, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM accounts WHERE id = ?)`,
+		string(id),
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check account: %w", err)
+	}
+	return exists == 1, nil
+}
+
+// CodeExists проверяет уникальность пользовательского кода.
+func (s *Store) CodeExists(ctx context.Context, code string) (bool, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM accounts WHERE code_value = ?)`,
+		code,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check user code: %w", err)
+	}
+	return exists == 1, nil
+}
+
+// PatientIDByCode находит пациента по коду вида PXXXXXX.
+func (s *Store) PatientIDByCode(ctx context.Context, code string) (domain.ID, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT p.account_id
+		FROM patients p
+		JOIN accounts a ON a.id = p.account_id
+		WHERE a.code_value = ? AND a.role = ?`,
+		code,
+		string(domain.RolePatient),
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", domain.ErrNotFound
+		}
+		return "", fmt.Errorf("find patient by code: %w", err)
+	}
+	return domain.ID(id), nil
 }
 
 func (s *Store) HasActiveRelationship(ctx context.Context, patientID, doctorID domain.ID) (bool, error) {
@@ -449,20 +551,28 @@ func (s *Store) ListAssignmentsForPatient(ctx context.Context, patientID domain.
 	}
 	defer rows.Close()
 
-	var result []domain.Assignment
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan assignment id: %w", err)
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assignments: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close assignment rows: %w", err)
+	}
+
+	result := make([]domain.Assignment, 0, len(ids))
+	for _, id := range ids {
 		assignment, err := s.GetAssignment(ctx, domain.ID(id))
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, assignment)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate assignments: %w", err)
 	}
 	return result, nil
 }

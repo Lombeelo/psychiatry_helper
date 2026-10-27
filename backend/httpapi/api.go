@@ -24,10 +24,11 @@ type Authenticator interface {
 
 type Service interface {
 	CreatePatient(r *http.Request, userID domain.ID, req CreatePatientRequest) (domain.Patient, error)
+	CreateDoctor(r *http.Request, userID domain.ID, req CreateDoctorRequest) (domain.Doctor, error)
 	CreateRelationship(r *http.Request, doctorID domain.ID, req CreateRelationshipRequest) (domain.CareRelationship, error)
 	EndRelationship(r *http.Request, doctorID, relationshipID domain.ID) error
 
-	ListAssignments(r *http.Request, userID domain.ID, role domain.AccountRole) ([]domain.Assignment, error)
+	ListAssignments(r *http.Request, userID domain.ID, role domain.AccountRole, patientID domain.ID) ([]domain.Assignment, error)
 	CreateAssignment(r *http.Request, doctorID domain.ID, req CreateAssignmentRequest) (domain.Assignment, error)
 	ChangeAssignmentStatus(r *http.Request, doctorID, assignmentID domain.ID, action string) error
 	CompleteAssignment(r *http.Request, patientID, assignmentID domain.ID, req CompleteAssignmentRequest) (domain.Completion, error)
@@ -60,6 +61,7 @@ func (a *API) routes() {
 	})
 
 	a.mux.HandleFunc("POST /v1/patients", a.createPatient)
+	a.mux.HandleFunc("POST /v1/doctors", a.createDoctor)
 	a.mux.HandleFunc("POST /v1/relationships", a.createRelationship)
 	a.mux.HandleFunc("POST /v1/relationships/{id}/end", a.endRelationship)
 
@@ -67,6 +69,8 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /v1/assignments", a.createAssignment)
 	a.mux.HandleFunc("POST /v1/assignments/{id}/pause", a.assignmentAction("pause"))
 	a.mux.HandleFunc("POST /v1/assignments/{id}/resume", a.assignmentAction("resume"))
+	a.mux.HandleFunc("POST /v1/assignments/{id}/close", a.assignmentAction("close"))
+	a.mux.HandleFunc("POST /v1/assignments/{id}/cancel", a.assignmentAction("cancel"))
 	a.mux.HandleFunc("POST /v1/assignments/{id}/complete", a.completeAssignment)
 
 	a.mux.HandleFunc("POST /v1/journal-entries", a.createJournalEntry)
@@ -80,8 +84,14 @@ type CreatePatientRequest struct {
 	Accepted      bool   `json:"accepted"`
 }
 
+type CreateDoctorRequest struct {
+	DisplayName string `json:"display_name"`
+	DateOfBirth string `json:"date_of_birth"` // YYYY-MM-DD
+	Specialty   string `json:"specialty"`
+}
+
 type CreateRelationshipRequest struct {
-	PatientID domain.ID `json:"patient_id"`
+	PatientCode string `json:"patient_code"`
 }
 
 type CreateAssignmentRequest struct {
@@ -97,8 +107,22 @@ type CreateAssignmentRequest struct {
 }
 
 type CompleteAssignmentRequest struct {
-	Comment string `json:"comment"`
-	Result  string `json:"result"`
+	Comment          string                   `json:"comment"`
+	Result           string                   `json:"result"`
+	MedicationIntake *MedicationIntakeRequest `json:"medication_intake,omitempty"`
+	SideEffects      *SideEffectReportRequest `json:"side_effects,omitempty"`
+}
+
+type MedicationIntakeRequest struct {
+	TakenAt         time.Time `json:"taken_at"`
+	ReportedAsTaken bool      `json:"reported_as_taken"`
+	DosageTaken     string    `json:"dosage_taken"`
+}
+
+type SideEffectReportRequest struct {
+	Effects    []string  `json:"effects"`
+	Comment    string    `json:"comment"`
+	ReportedAt time.Time `json:"reported_at"`
 }
 
 type CreateJournalEntryRequest struct {
@@ -121,22 +145,29 @@ func (a *API) createPatient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dob, err := time.Parse("2006-01-02", req.DateOfBirth)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_date_of_birth", "date_of_birth must use YYYY-MM-DD")
-		return
-	}
-	if !req.Accepted || strings.TrimSpace(req.PolicyVersion) == "" {
-		writeError(w, http.StatusBadRequest, "consent_required", "accepted consent and policy_version are required")
-		return
-	}
-
 	out, err := a.svc.CreatePatient(r, p.UserID, req)
 	if err != nil {
 		a.writeServiceError(w, err)
 		return
 	}
-	_ = dob // Передайте распарсенную дату в DTO сервиса, если DTO хранит time.Time.
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (a *API) createDoctor(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.requireRole(w, r, domain.RoleDoctor)
+	if !ok {
+		return
+	}
+	var req CreateDoctorRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	out, err := a.svc.CreateDoctor(r, p.UserID, req)
+	if err != nil {
+		a.writeServiceError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -149,8 +180,12 @@ func (a *API) createRelationship(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !req.PatientID.Valid() {
-		writeError(w, http.StatusBadRequest, "invalid_patient_id", "patient_id is required")
+	code := domain.UserCode{
+		Value: req.PatientCode,
+		Role:  domain.RolePatient,
+	}
+	if err := code.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_patient_code", "patient_code must match PXXXXXX")
 		return
 	}
 	out, err := a.svc.CreateRelationship(r, p.UserID, req)
@@ -183,7 +218,8 @@ func (a *API) listAssignments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, err := a.svc.ListAssignments(r, p.UserID, p.Role)
+	patientID := domain.ID(strings.TrimSpace(r.URL.Query().Get("patient_id")))
+	out, err := a.svc.ListAssignments(r, p.UserID, p.Role, patientID)
 	if err != nil {
 		a.writeServiceError(w, err)
 		return
@@ -330,6 +366,14 @@ func (a *API) writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrInvalidTransition),
 		errors.Is(err, domain.ErrAlreadyEnded):
 		writeError(w, http.StatusConflict, "invalid_transition", err.Error())
+	case errors.Is(err, domain.ErrDuplicateRelationship):
+		writeError(w, http.StatusConflict, "relationship_exists", "active care relationship already exists")
+	case errors.Is(err, domain.ErrAccountExists):
+		writeError(w, http.StatusConflict, "account_exists", "account already exists")
+	case errors.Is(err, domain.ErrUserNotFound):
+		writeError(w, http.StatusNotFound, "user_not_found", "user with this code was not found")
+	case errors.Is(err, domain.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "requested object was not found")
 	case errors.Is(err, domain.ErrInactiveRelation),
 		errors.Is(err, domain.ErrAssignmentMismatch):
 		writeError(w, http.StatusForbidden, "access_denied", "operation is not allowed")

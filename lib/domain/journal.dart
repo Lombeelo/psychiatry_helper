@@ -19,10 +19,7 @@ class JournalEntry {
 }
 
 class MoodAnswer {
-  const MoodAnswer({
-    required this.question,
-    required this.value,
-  });
+  const MoodAnswer({required this.question, required this.value});
 
   final String question;
   final String value;

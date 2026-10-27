@@ -71,20 +71,20 @@ class Assignment {
   Assignment _changeStatus(AssignmentStatus next) {
     final allowed = switch (status) {
       AssignmentStatus.active => {
-          AssignmentStatus.paused,
-          AssignmentStatus.completed,
-          AssignmentStatus.cancelled,
-          AssignmentStatus.expired,
-        },
+        AssignmentStatus.paused,
+        AssignmentStatus.completed,
+        AssignmentStatus.cancelled,
+        AssignmentStatus.expired,
+      },
       AssignmentStatus.paused => {
-          AssignmentStatus.active,
-          AssignmentStatus.cancelled,
-          AssignmentStatus.expired,
-        },
+        AssignmentStatus.active,
+        AssignmentStatus.completed,
+        AssignmentStatus.cancelled,
+        AssignmentStatus.expired,
+      },
       AssignmentStatus.completed ||
       AssignmentStatus.expired ||
-      AssignmentStatus.cancelled =>
-        <AssignmentStatus>{},
+      AssignmentStatus.cancelled => <AssignmentStatus>{},
     };
 
     if (!allowed.contains(next)) {
@@ -110,24 +110,24 @@ class MedicationIntake {
   const MedicationIntake({
     required this.takenAt,
     required this.reportedAsTaken,
-    this.dosageTaken,
+    required this.dosageTaken,
   });
 
   final DateTime takenAt;
   final bool reportedAsTaken;
-  final String? dosageTaken;
+  final String dosageTaken;
 }
 
 class SideEffectReport {
   const SideEffectReport({
     required this.effects,
     required this.reportedAt,
-    this.comment,
+    required this.comment,
   });
 
   final List<String> effects;
   final DateTime reportedAt;
-  final String? comment;
+  final String comment;
 }
 
 class Completion {
@@ -136,8 +136,8 @@ class Completion {
     required this.assignmentId,
     required this.patientId,
     required this.completedAt,
-    this.comment,
-    this.result,
+    required this.comment,
+    required this.result,
     this.medicationIntake,
     this.sideEffectReport,
   });
@@ -146,8 +146,8 @@ class Completion {
   final Id assignmentId;
   final Id patientId;
   final DateTime completedAt;
-  final String? comment;
-  final String? result;
+  final String comment;
+  final String result;
   final MedicationIntake? medicationIntake;
   final SideEffectReport? sideEffectReport;
 }

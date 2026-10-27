@@ -2,29 +2,15 @@ typedef Id = String; // UUID в строковом представлении
 
 enum AccountRole { patient, doctor, admin }
 
-enum AssignmentType {
-  medication,
-  questionnaire,
-  appCheckIn,
-  journalTask,
-}
+enum AssignmentType { medication, questionnaire, appCheckIn, journalTask }
 
-enum AssignmentStatus {
-  active,
-  completed,
-  paused,
-  expired,
-  cancelled,
-}
+enum AssignmentStatus { active, completed, paused, expired, cancelled }
 
 enum RelationshipStatus { active, ended }
 
 enum StatusColor { green, yellow, red }
 
-enum StatusReasonKind {
-  missedMedications,
-  stablyLowQuestionnaireResults,
-}
+enum StatusReasonKind { missedMedications, stablyLowQuestionnaireResults }
 
 enum NotificationType {
   patientStatusChanged,
@@ -34,32 +20,41 @@ enum NotificationType {
 }
 
 class UserCode {
-  const UserCode({
-    required this.value,
-    required this.role,
-  });
+  const UserCode({required this.value, required this.role});
+
+  /// Длина кода вместе с префиксом: PXXXXXX или VXXXXXX.
+  static const int length = 7;
 
   final String value;
   final AccountRole role;
 
-  bool get hasExpectedPrefix {
+  /// Проверяет формат кода, который отображается вместо персональных данных.
+  /// Точный алфавит суффикса задаётся здесь и дублируется на сервере.
+  bool isValid() {
+    final normalized = value.trim();
+    if (normalized.length != length) {
+      return false;
+    }
+
     final prefix = switch (role) {
       AccountRole.patient => 'P',
       AccountRole.doctor => 'V',
-      AccountRole.admin => '',
+      // Администратор — заглушка и не имеет рабочего кода.
+      AccountRole.admin => null,
     };
 
-    return prefix.isEmpty || value.startsWith(prefix);
+    if (prefix == null || !normalized.startsWith(prefix)) {
+      return false;
+    }
+
+    return _suffixPattern.hasMatch(normalized.substring(1));
   }
 
-  // Проверку точного формата XXXXXX выполняйте по конфигурации сервера.
+  static final RegExp _suffixPattern = RegExp(r'^[A-Z0-9]{6}$');
 }
 
 class PersonalData {
-  const PersonalData({
-    required this.displayName,
-    this.dateOfBirth,
-  });
+  const PersonalData({required this.displayName, this.dateOfBirth});
 
   final String displayName;
   final DateTime? dateOfBirth;
@@ -81,11 +76,7 @@ class Period {
   final DateTime startsAt;
   final DateTime endsAt;
 
-  const Period({
-    required this.startsAt,
-    required this.endsAt,
-  });
-
+  const Period({required this.startsAt, required this.endsAt});
 
   bool contains(DateTime value) =>
       !value.isBefore(startsAt) && !value.isAfter(endsAt);
@@ -96,24 +87,22 @@ class Schedule {
     required this.frequency,
     required this.daysOfWeek,
     required this.timesOfDay,
-    required this.timeZoneId,
   });
 
   /// Например: "DAILY" или "WEEKLY". Формат следует закрепить в API.
   final String frequency;
   final List<int> daysOfWeek; // 1 = понедельник, 7 = воскресенье
-  final List<String> timesOfDay; // Локальное время, например "09:30"
-  final String timeZoneId; // Например, "Europe/Moscow"
+  final List<String> timesOfDay; // Локальное время пациента, например "09:30"
 }
 
 class Dosage {
   const Dosage({
     required this.amount,
     required this.unit,
-    this.instructions,
+    required this.instructions,
   });
 
   final double amount;
   final String unit;
-  final String? instructions;
+  final String instructions;
 }

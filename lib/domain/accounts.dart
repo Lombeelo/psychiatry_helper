@@ -1,37 +1,71 @@
 import 'common.dart';
 
-class Patient {
-  const Patient({
+/// Общая часть учётной записи. Patient, Doctor и AdminStub различаются
+/// ролью и профилем.
+abstract class Account {
+  const Account({
     required this.accountId,
     required this.code,
     required this.personalData,
     required this.createdAt,
-    required this.notes,
+  });
+
+  final Id accountId;
+  final UserCode code;
+  final PersonalData personalData;
+  final DateTime createdAt;
+}
+
+class PatientProfile {
+  const PatientProfile({this.notes = ''});
+
+  final String notes;
+}
+
+class DoctorProfile {
+  const DoctorProfile({this.specialty = ''});
+
+  final String specialty;
+}
+
+class Patient extends Account {
+  const Patient({
+    required super.accountId,
+    required super.code,
+    required super.personalData,
+    required super.createdAt,
+    required this.profile,
     required this.consent,
   });
 
-  final Id accountId;
-  final UserCode code;
-  final PersonalData personalData;
-  final DateTime createdAt;
-  final String notes;
+  final PatientProfile profile;
   final Consent consent;
 }
 
-class Doctor {
+class Doctor extends Account {
   const Doctor({
-    required this.accountId,
-    required this.code,
-    required this.personalData,
-    required this.createdAt,
-    required this.specialty,
+    required super.accountId,
+    required super.code,
+    required super.personalData,
+    required super.createdAt,
+    required this.profile,
   });
 
-  final Id accountId;
-  final UserCode code;
-  final PersonalData personalData;
-  final DateTime createdAt;
-  final String specialty;
+  final DoctorProfile profile;
+}
+
+/// Заглушка роли администратора. Административные функции в MVP
+/// не реализуются, поэтому доступен только сам факт наличия роли.
+class AdminStub extends Account {
+  const AdminStub({
+    required super.accountId,
+    required super.code,
+    required super.personalData,
+    required super.createdAt,
+    this.available = false,
+  });
+
+  final bool available;
 }
 
 class CareRelationship {
@@ -50,6 +84,8 @@ class CareRelationship {
   final DateTime createdAt;
   final RelationshipStatus status;
   final DateTime? endedAt;
+
+  bool get isActive => status == RelationshipStatus.active;
 
   CareRelationship end(DateTime at) {
     if (status == RelationshipStatus.ended) {
