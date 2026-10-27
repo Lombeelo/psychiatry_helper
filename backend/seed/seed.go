@@ -163,7 +163,13 @@ func seedMedications(ctx context.Context, store *sqlitestore.Store) error {
 			ID:              "med-sertraline",
 			Name:            "Сертралин",
 			GroupID:         "group-ssri",
-			InstructionText: "Принимать утром после еды. Дозу подбирает врач.",
+			InstructionText: "Принимать утром после еды.",
+		},
+		{
+			ID:              "med-aviandr",
+			Name:            "Авиандр",
+			GroupID:         "group-anxiolytic",
+			InstructionText: "Пациенты пожилого возраста обычно более чувствительны, особенно в отношении побочных эффектов.\nНельзя исключить возможность развития лекарственной зависимости или синдрома отмены.",
 		},
 		{
 			ID:              "med-escitalopram",
