@@ -1,17 +1,36 @@
-# psychiatry_helper
+# Программа сопровождения пациентов у психиатра
 
-A new Flutter project.
+Данная программа назначена для сопровождения пациентов. Функции:
+- назначение препаратов, пациенты отмечают их потребление
+- Назначение отметок настроения ежедневных
+- Назначение ведения дневника
+- Отслеживание статуса пациента, в зависимости от пропущенных приёмов препарата
+- Заглушка системы поддержки пациентов в виде чата
+- Заглушка геймификации
 
-## Getting Started
+# Архитектура
 
-This project is a starting point for a Flutter application.
+Написано с помощью DeepSeek Harness с deepseek-v4-flash, обошлось в 45 рублей и 50 минут.
+Изначальный промпт находится в descriptions/model_desc.md, сгенерированная и отревьювленная по самое немогу модель предметной области в descriptions/model2.puml. Это составлялось в duck.ai с нейронкой ChatGPT Luna 6.
+По ходу можно заметить много забавных комментариев, надеюсь, будет нескучно.
+В целом, папка descriptions содержит весь ручной труд.
 
-A few resources to get you started if this is your first Flutter project:
+Старался сделать так, чтобы разработка шла по DDD, с луковой архитектурой: сначала реализуется домен, потом api, потом хранилище/интерфейс
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+
+# Запуск
+
+Бэк
+
+Пререквизиты: установленный go
+
+> cd backend
+> go run .
+
+Фронт
+
+Пререквизиты: установленный Visual Studio с компонентами разработки desktop приложений на ПК, установленный flutter (я через плагин vscode делал, по инструкции с руководства для разрабов), и установленный dart
+
+(из корневой папки)
+> flutter run -d windows --dart-define=API_BASE_URL=http://localhost:8080
